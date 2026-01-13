@@ -3,10 +3,10 @@
  * Licensed under the MIT License. See LICENSE in the project root for license information.
  */
 use eira::{
-    FileSpanMessage, Header, Kind, Label, Pos, PosSpan, Scope, SourceFileSection, SourceLines,
+    Color, FileSpanMessage, Header, Kind, Label, Pos, PosSpan, Printer, Scope, SourceFileSection,
+    SourceLines,
 };
 use std::io::stderr;
-use yansi::{Color, Paint};
 
 struct TestSource {
     lines: Vec<String>,
@@ -39,10 +39,11 @@ fn main() {
         start: Pos { x: 13, y: 3 },
         character_count: 15,
         color: Color::BrightGreen,
-        text: "this variable is not defined".bold().to_string(),
+        text: "this variable is not defined".to_string(),
     });
 
-    l.draw(&source, stderr()).unwrap();
+    let printer = Printer::new();
+    l.draw(&source, &printer, stderr()).unwrap();
 }
 
 #[test]
@@ -72,7 +73,8 @@ fn main() {
     });
 
     eprintln!("---------------");
-    l.draw(&source, stderr()).unwrap();
+    let printer = Printer::new();
+    l.draw(&source, &printer, stderr()).unwrap();
 }
 
 #[test]
@@ -107,7 +109,8 @@ fn main() {
     });
 
     eprintln!("---------------");
-    l.draw(&source, stderr()).unwrap();
+    let printer = Printer::new();
+    l.draw(&source, &printer, stderr()).unwrap();
 }
 
 #[test]
@@ -132,7 +135,10 @@ fn main() {
         code_prefix: "".to_string(),
         message: "Illegal symbol for the type".to_string(),
     };
-    header.write(stderr()).expect("header should work");
+    let printer = Printer::new();
+    header
+        .write(&printer, stderr())
+        .expect("header should work");
 
     FileSpanMessage::write(
         "imaginary/path/render.swamp",
@@ -140,6 +146,7 @@ fn main() {
             pos: Pos { x: 14, y: 1 },
             length: 13,
         },
+        &printer,
         stderr(),
     )
     .expect("filespan message should work");
@@ -156,7 +163,7 @@ fn main() {
             length: 1,
         },
         color: Color::Red,
-        text: "If scope is here".bold().to_string(),
+        text: "If scope is here".to_string(),
     });
 
     l.scopes.push(Scope {
@@ -169,16 +176,16 @@ fn main() {
             length: 1,
         },
         color: Color::Green,
-        text: "this is the scope".bold().to_string(),
+        text: "this is the scope".to_string(),
     });
 
-    let label_color = Color::Rgb(154, 128, 255);
+    let label_color = Color::BrightMagenta;
 
     let unknown_function_message = format!(
         "{}{}{}",
-        "function '".bold(),
-        "println!".fg(Color::BrightBlue),
-        "' is unknown".bold()
+        "function '",
+        tinter::bright_blue("println!"),
+        "' is unknown"
     );
 
     l.labels.push(Label {
@@ -190,9 +197,9 @@ fn main() {
 
     let variable_message = format!(
         "{}{}{}",
-        "Variable '".bold(),
-        "undefined_value".fg(label_color),
-        "' defined".bold()
+        "Variable '",
+        tinter::color(label_color, "undefined_value"),
+        "' defined"
     );
 
     l.labels.push(Label {
@@ -206,9 +213,9 @@ fn main() {
         start: Pos { x: 9, y: 3 },
         character_count: 1,
         color: Color::BrightCyan,
-        text: "not sure what 'x' is".bold().to_string(),
+        text: "not sure what 'x' is".to_string(),
     });
 
     l.layout();
-    l.draw(&source, stderr()).unwrap();
+    l.draw(&source, &printer, stderr()).unwrap();
 }

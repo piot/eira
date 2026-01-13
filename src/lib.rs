@@ -7,9 +7,14 @@ pub mod prelude;
 use std::fmt::{Display, Formatter};
 use std::io;
 use std::io::Write;
-use yansi::Paint;
 
-pub use yansi::Color;
+pub use tinter::Color;
+pub use tinter::Printer;
+
+// Visual constants
+const MIN_CONNECTOR_DASHES: usize = 2;
+const MAX_CONNECTOR_DASHES: usize = 8;
+const CONNECTOR_DASH_DIVISOR: usize = 4;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Pos {
@@ -53,6 +58,7 @@ pub trait SourceLines {
 pub struct SourceFileSection {
     pub scopes: Vec<Scope>,
     pub labels: Vec<Label>,
+    pub tab_expansion_width: usize,
 }
 
 impl Default for SourceFileSection {
@@ -74,6 +80,7 @@ impl SourceFileSection {
         Self {
             scopes: vec![],
             labels: vec![],
+            tab_expansion_width: 4,
         }
     }
 
@@ -97,23 +104,40 @@ impl SourceFileSection {
         line_labels: &[&Label],
         scopes: &[&Scope],
         line_number: usize,
+        source_line: &str,
+        tab_width: usize,
     ) -> Vec<ColoredSpan> {
         let mut spans = Vec::new();
 
-        // Add label spans
-        spans.extend(line_labels.iter().map(|label| ColoredSpan {
-            pos: PosSpan {
-                pos: label.start.clone(),
-                length: label.character_count,
-            },
-            color: label.color,
+        // Add label spans with adjusted positions
+        spans.extend(line_labels.iter().map(|label| {
+            let visual_x =
+                Self::convert_char_pos_to_visual_pos(source_line, label.start.x, tab_width);
+            ColoredSpan {
+                pos: PosSpan {
+                    pos: Pos {
+                        x: visual_x,
+                        y: label.start.y,
+                    },
+                    length: label.character_count,
+                },
+                color: label.color,
+            }
         }));
 
-        // Add scope start spans
+        // Add scope start spans with adjusted positions
         spans.extend(scopes.iter().filter_map(|scope| {
             if scope.start.pos.y == line_number {
+                let visual_x =
+                    Self::convert_char_pos_to_visual_pos(source_line, scope.start.pos.x, tab_width);
                 Some(ColoredSpan {
-                    pos: scope.start.clone(),
+                    pos: PosSpan {
+                        pos: Pos {
+                            x: visual_x,
+                            y: scope.start.pos.y,
+                        },
+                        length: scope.start.length,
+                    },
                     color: scope.color,
                 })
             } else {
@@ -121,11 +145,19 @@ impl SourceFileSection {
             }
         }));
 
-        // Add scope end spans
+        // Add scope end spans with adjusted positions
         spans.extend(scopes.iter().filter_map(|scope| {
             if scope.end.pos.y == line_number {
+                let visual_x =
+                    Self::convert_char_pos_to_visual_pos(source_line, scope.end.pos.x, tab_width);
                 Some(ColoredSpan {
-                    pos: scope.end.clone(),
+                    pos: PosSpan {
+                        pos: Pos {
+                            x: visual_x,
+                            y: scope.end.pos.y,
+                        },
+                        length: scope.end.length,
+                    },
                     color: scope.color,
                 })
             } else {
@@ -136,13 +168,44 @@ impl SourceFileSection {
         spans
     }
 
-    /// Writes a source line exactly as it is in the source file, but the colors are used from the `ColoredSpan`.
+    /// Converts tabs to spaces - each tab becomes exactly `tab_width` spaces.
+    fn expand_tabs(source_line: &str, tab_width: usize) -> String {
+        source_line.replace('\t', &" ".repeat(tab_width))
+    }
+
+    /// Converts a character position (where tab=1 char) to a visual position (where `tab=tab_width` chars).
+    fn convert_char_pos_to_visual_pos(
+        source_line: &str,
+        char_pos: usize,
+        tab_width: usize,
+    ) -> usize {
+        let chars: Vec<char> = source_line.chars().collect();
+        let mut visual_pos = 0;
+
+        for ch in chars
+            .iter()
+            .take(char_pos.saturating_sub(1).min(chars.len()))
+        {
+            if *ch == '\t' {
+                visual_pos += tab_width;
+            } else {
+                visual_pos += 1;
+            }
+        }
+
+        visual_pos + 1 // Convert to 1-based position
+    }
+
+    /// Writes a source line with syntax coloring based on colored spans.
     fn write_source_line<W: Write>(
         source_line: &str,
         colored_spans: &[ColoredSpan],
+        tab_width: usize,
+        printer: &Printer,
         mut writer: W,
     ) -> io::Result<()> {
-        let chars: Vec<char> = source_line.chars().collect();
+        let expanded_line = Self::expand_tabs(source_line, tab_width);
+        let chars: Vec<char> = expanded_line.chars().collect();
         let mut current_pos = 0;
 
         while current_pos < chars.len() {
@@ -165,7 +228,7 @@ impl SourceFileSection {
 
             let text: String = chars[current_pos..region_end].iter().collect();
             if let Some(span) = matching_span {
-                write!(writer, "{}", text.fg(span.color))?;
+                write!(writer, "{}", printer.color(span.color, &text))?;
             } else {
                 write!(writer, "{text}")?;
             }
@@ -177,6 +240,7 @@ impl SourceFileSection {
         Ok(())
     }
 
+    /// Calculates which line numbers need to be displayed based on labels and scopes.
     #[must_use]
     pub fn calculate_source_lines_that_must_be_shown(&self) -> Vec<usize> {
         // Only filter out source code lines that will be referenced by scope or labels
@@ -195,7 +259,7 @@ impl SourceFileSection {
         lines_to_show
     }
 
-    /// Sorts the labels and scopes
+    /// Sorts the labels and scopes by position for consistent rendering.
     pub fn layout(&mut self) {
         // Sort scopes by x position first, then by y position
         self.scopes
@@ -211,10 +275,11 @@ impl SourceFileSection {
         });
     }
 
-    /// Write bars for active scopes
+    /// Writes vertical bars for active scopes in the prefix area.
     fn write_scope_continuation<W: Write>(
         active_scopes: &[&Scope],
         max_scopes: usize,
+        printer: &Printer,
         mut writer: W,
     ) -> io::Result<()> {
         let mut sorted_scopes = active_scopes.to_vec();
@@ -222,7 +287,7 @@ impl SourceFileSection {
 
         for i in 0..max_scopes {
             if let Some(scope) = sorted_scopes.get(i) {
-                write!(writer, "{}", "│".fg(scope.color))?;
+                write!(writer, "{}", printer.color(scope.color, "│"))?;
                 Self::scope_margin_pad(3, &mut writer)?;
             } else {
                 Self::scope_margin_pad(4, &mut writer)?;
@@ -231,10 +296,11 @@ impl SourceFileSection {
         Ok(())
     }
 
-    /// Writes the mandatory margin for a source code block with description items
+    /// Writes the line number and separator prefix for each line.
     fn write_line_prefix<W: Write>(
         max_line_num_width: usize,
         line_number: Option<usize>,
+        printer: &Printer,
         mut writer: W,
     ) -> io::Result<()> {
         let number_string =
@@ -243,18 +309,22 @@ impl SourceFileSection {
         let padding = max_line_num_width - number_string.len();
 
         Self::line_number_margin_pad(padding, &mut writer)?;
-        write!(writer, "{}", number_string.fg(Color::BrightBlack))?;
+        write!(
+            writer,
+            "{}",
+            printer.color(Color::BrightBlack, &number_string)
+        )?;
         Self::line_number_margin_pad(1, &mut writer)?;
         let separator = if line_number.is_some() { "|" } else { "·" };
 
-        write!(writer, "{}", separator.fg(Color::BrightBlack))?;
+        write!(writer, "{}", printer.color(Color::BrightBlack, separator))?;
         Self::line_number_margin_pad(1, &mut writer)?;
 
         Ok(())
     }
 
-    /// Calculates the maximum number of overlapping scope items for the source block
-    /// Needed for the padding
+    /// Calculates the maximum number of overlapping scope items for the source block.
+    /// This is needed to determine the correct padding width.
     #[must_use]
     pub fn calculate_max_overlapping_scopes(scopes: &[Scope]) -> usize {
         scopes.iter().fold(0, |max_count, scope| {
@@ -268,22 +338,29 @@ impl SourceFileSection {
         })
     }
 
-    /// # Errors
+    /// Writes a source code line with all its prefixes (line number, scope bars).
     ///
-    /// # Panics
-    /// if the line number was not provided in `PrefixInfo`.
+    /// # Errors
+    /// Returns an error if the line number is not provided in `PrefixInfo`,
+    /// or if there are I/O errors during writing.
     pub fn write_source_line_with_prefixes(
         prefix_info: &PrefixInfo,
         labels: &[&Label],
         source_line: &str,
+        tab_width: usize,
+        printer: &Printer,
         mut writer: impl Write,
     ) -> io::Result<()> {
-        let current_line_number = prefix_info
-            .line_number
-            .expect("a source line was missing a line number");
+        let current_line_number = prefix_info.line_number.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "PrefixInfo is missing line_number for source line rendering",
+            )
+        })?;
         Self::write_line_prefix(
             prefix_info.max_number_string_size,
             Some(current_line_number),
+            printer,
             &mut writer,
         )?;
         for i in 0..prefix_info.maximum_overlapping_scope_count {
@@ -297,8 +374,7 @@ impl SourceFileSection {
                 } else {
                     "│"
                 };
-                let prefix = scope_line_prefix.fg(scope.color).to_string();
-                write!(writer, "{prefix}")?;
+                write!(writer, "{}", printer.color(scope.color, scope_line_prefix))?;
                 let padding = if is_start || is_end { 1 } else { 3 };
 
                 Self::scope_margin_pad(padding, &mut writer)?;
@@ -310,45 +386,58 @@ impl SourceFileSection {
             labels,
             prefix_info.active_scopes,
             current_line_number,
+            source_line,
+            tab_width,
         );
-        Self::write_source_line(source_line, &colored_spans, &mut writer)
+        Self::write_source_line(source_line, &colored_spans, tab_width, printer, &mut writer)
     }
 
-    /// The mandatory prefix for each line. The line number and active scopes.
-    /// # Errors
+    /// Writes the prefix for a line (line number and scope bars).
     ///
+    /// # Errors
+    /// Returns an error if there are I/O errors during writing.
     pub fn write_start_of_line_prefix(
         prefix: &PrefixInfo,
+        printer: &Printer,
         mut writer: impl Write,
     ) -> io::Result<()> {
         Self::write_line_prefix(
             prefix.max_number_string_size,
             prefix.line_number,
+            printer,
             &mut writer,
         )?;
 
         Self::write_scope_continuation(
             prefix.active_scopes,
             prefix.maximum_overlapping_scope_count,
+            printer,
             &mut writer,
         )
     }
 
-    /// Underlines spans for upcoming labels to reference.
-    /// # Errors
+    /// Writes underline markers (─┬─) beneath source code to indicate label positions.
     ///
+    /// # Errors
+    /// Returns an error if character_count is zero or if there are I/O errors during writing.
     pub fn write_underlines_for_upcoming_labels(
         prefix_info: &PrefixInfo,
         line_labels: &[&Label],
+        source_line: &str,
+        tab_width: usize,
+        printer: &Printer,
         mut writer: impl Write,
     ) -> io::Result<()> {
-        Self::write_start_of_line_prefix(prefix_info, &mut writer)?;
+        Self::write_start_of_line_prefix(prefix_info, printer, &mut writer)?;
 
         let mut current_pos = 0;
 
         for label in line_labels.iter().rev() {
-            if label.start.x > current_pos {
-                Self::source_code_pad(label.start.x - 1 - current_pos, &mut writer)?;
+            let visual_x =
+                Self::convert_char_pos_to_visual_pos(source_line, label.start.x, tab_width);
+
+            if visual_x > current_pos {
+                Self::source_code_pad(visual_x - 1 - current_pos, &mut writer)?;
             }
 
             if label.character_count == 0 {
@@ -362,45 +451,57 @@ impl SourceFileSection {
                 .map(|i| if i == middle { '┬' } else { '─' })
                 .collect();
 
-            write!(writer, "{}", underline.fg(label.color))?;
+            write!(writer, "{}", printer.color(label.color, &underline))?;
 
-            current_pos = label.start.x - 1 + label.character_count;
+            current_pos = visual_x - 1 + label.character_count;
         }
 
         writeln!(writer)
     }
 
-    /// Writes the line labels
-    /// # Errors
+    /// Writes label text with connectors (╰──) pointing to their positions in the source.
     ///
+    /// # Errors
+    /// Returns an error if there are I/O errors during writing.
     pub fn write_labels(
         prefix_info: &PrefixInfo,
         line_labels: &[&Label],
+        source_line: &str,
+        tab_width: usize,
+        printer: &Printer,
         mut writer: impl Write,
     ) -> io::Result<()> {
         for (idx, label) in line_labels.iter().enumerate() {
-            Self::write_start_of_line_prefix(prefix_info, &mut writer)?;
+            Self::write_start_of_line_prefix(prefix_info, printer, &mut writer)?;
 
             let mut current_pos = 0;
 
             // Draw vertical bars for all labels that will come after this one
             for future_label in line_labels.iter().skip(idx + 1) {
-                let middle = (future_label.start.x - 1) + (future_label.character_count - 1) / 2;
+                let visual_x = Self::convert_char_pos_to_visual_pos(
+                    source_line,
+                    future_label.start.x,
+                    tab_width,
+                );
+                let middle = (visual_x - 1) + (future_label.character_count - 1) / 2;
                 Self::source_code_pad(middle - current_pos, &mut writer)?;
-                write!(writer, "{}", "│".fg(future_label.color))?;
+                write!(writer, "{}", printer.color(future_label.color, "│"))?;
                 current_pos = middle + 1;
             }
 
             // TODO: Store the aligned position so it doesn't have to be calculated again.
-            let middle = (label.start.x - 1) + (label.character_count - 1) / 2;
+            let visual_x =
+                Self::convert_char_pos_to_visual_pos(source_line, label.start.x, tab_width);
+            let middle = (visual_x - 1) + (label.character_count - 1) / 2;
             if middle > current_pos {
                 Self::source_code_pad(middle - current_pos, &mut writer)?;
             }
 
-            // line length somewhat proportional to the span so it looks nicer
-            let dash_count = (label.character_count / 4).clamp(2, 8);
+            // Line length somewhat proportional to the span so it looks nicer
+            let dash_count = (label.character_count / CONNECTOR_DASH_DIVISOR)
+                .clamp(MIN_CONNECTOR_DASHES, MAX_CONNECTOR_DASHES);
             let connector = format!("╰{}", "─".repeat(dash_count));
-            let label_line = format!("{} {}", connector.fg(label.color), label.text);
+            let label_line = format!("{} {}", printer.color(label.color, &connector), label.text);
             write!(writer, "{label_line}")?;
 
             writeln!(writer)?;
@@ -408,47 +509,59 @@ impl SourceFileSection {
         Ok(())
     }
 
-    /// Writes the description for scopes that have ended
-    /// # Errors
+    /// Writes text descriptions for scopes that end on the current line.
     ///
+    /// # Errors
+    /// Returns an error if there are I/O errors during writing.
     pub fn write_text_for_ending_scopes(
         prefix_info: &PrefixInfo,
         active_scopes: &[&Scope],
         line_number: usize, // Line number is provided, since the prefix_info line_number is `None`.
+        printer: &Printer,
         mut writer: impl Write,
     ) -> io::Result<()> {
         for scope in active_scopes {
             if scope.end.pos.y == line_number {
-                Self::write_start_of_line_prefix(prefix_info, &mut writer)?;
+                Self::write_start_of_line_prefix(prefix_info, printer, &mut writer)?;
                 writeln!(writer)?;
 
-                Self::write_line_prefix(prefix_info.max_number_string_size, None, &mut writer)?;
+                Self::write_line_prefix(
+                    prefix_info.max_number_string_size,
+                    None,
+                    printer,
+                    &mut writer,
+                )?;
 
                 for i in 0..prefix_info.maximum_overlapping_scope_count {
                     if let Some(s) = active_scopes.get(i) {
                         if s == scope {
-                            write!(writer, "{}", "╰─── ".fg(s.color))?;
+                            write!(writer, "{}", printer.color(s.color, "╰─── "))?;
                             break; // stop writing since we are on the scope text we should print
                         }
-                        write!(writer, "{}", "│".fg(s.color))?;
+                        write!(writer, "{}", printer.color(s.color, "│"))?;
                         Self::scope_margin_pad(3, &mut writer)?;
                     } else {
                         write!(writer, "    ")?;
                     }
                 }
-                writeln!(writer, "{}", scope.text.fg(scope.color))?;
+                writeln!(writer, "{}", printer.color(scope.color, &scope.text))?;
             }
         }
 
         Ok(())
     }
 
-    /// Draws the source file section
-    /// # Errors
+    /// Renders the complete source file section with all labels and scopes.
     ///
-    /// # Panics
-    /// If a source line can not be provided for the line number
-    pub fn draw<W: Write, S: SourceLines>(&self, source: &S, mut writer: W) -> io::Result<()> {
+    /// # Errors
+    /// Returns an error if a source line cannot be found for a line number,
+    /// or if there are I/O errors during writing.
+    pub fn draw<W: Write, S: SourceLines>(
+        &self,
+        source: &S,
+        printer: &Printer,
+        mut writer: W,
+    ) -> io::Result<()> {
         let line_numbers_to_show = self.calculate_source_lines_that_must_be_shown();
 
         let max_overlapping_scopes_count = Self::calculate_max_overlapping_scopes(&self.scopes);
@@ -459,9 +572,12 @@ impl SourceFileSection {
             .map_or(0, |&max_line| max_line.to_string().len());
 
         for &line_number in &line_numbers_to_show {
-            let source_line = source
-                .get_line(line_number)
-                .expect("Source code lines with the requested line number should exist");
+            let source_line = source.get_line(line_number).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Source line {line_number} not found in source map"),
+                )
+            })?;
 
             // Get active scopes for source line (includes end line)
             let active_scopes: Vec<_> = self
@@ -489,19 +605,36 @@ impl SourceFileSection {
                 &prefix_info,
                 &line_labels,
                 source_line,
+                self.tab_expansion_width,
+                printer,
                 &mut writer,
             )?;
 
             prefix_info.line_number = None; // only use line number when writing source lines
 
-            Self::write_underlines_for_upcoming_labels(&prefix_info, &line_labels, &mut writer)?;
+            Self::write_underlines_for_upcoming_labels(
+                &prefix_info,
+                &line_labels,
+                source_line,
+                self.tab_expansion_width,
+                printer,
+                &mut writer,
+            )?;
 
-            Self::write_labels(&prefix_info, &line_labels, &mut writer)?;
+            Self::write_labels(
+                &prefix_info,
+                &line_labels,
+                source_line,
+                self.tab_expansion_width,
+                printer,
+                &mut writer,
+            )?;
 
             Self::write_text_for_ending_scopes(
                 &prefix_info,
                 &active_scopes,
                 line_number,
+                printer,
                 &mut writer,
             )?;
         }
@@ -547,22 +680,24 @@ impl<C: Display> Header<C> {
         }
     }
 
-    /// # Errors
+    /// Writes the error/warning header with code and message.
     ///
-    pub fn write<W: Write>(&self, mut writer: W) -> io::Result<()> {
+    /// # Errors
+    /// Returns an error if there are I/O errors during writing.
+    pub fn write<W: Write>(&self, printer: &Printer, mut writer: W) -> io::Result<()> {
         write!(
             writer,
             "{}",
-            self.header_kind.fg(Self::color_for_kind(self.header_kind))
+            printer.color(Self::color_for_kind(self.header_kind), &self.header_kind)
         )?;
         write!(
             writer,
             "[{}{}]",
-            self.code_prefix.fg(Color::White),
-            self.code.fg(Color::Blue)
+            printer.color(Color::White, &self.code_prefix),
+            printer.color(Color::Blue, &self.code)
         )?;
         write!(writer, ": ")?;
-        write!(writer, "{}", self.message.bold())?;
+        write!(writer, "{}", &self.message)?;
         writeln!(writer)
     }
 }
@@ -570,22 +705,27 @@ impl<C: Display> Header<C> {
 pub struct FileSpanMessage;
 
 impl FileSpanMessage {
+    /// Writes the file location pointer (e.g., " --> file.txt:3:10").
+    ///
     /// # Errors
-    ///
-    /// # Panics
-    ///
+    /// Returns an error if there are I/O errors during writing.
     pub fn write<W: Write>(
         relative_file_name: &str,
         pos_span: &PosSpan,
+        printer: &Printer,
         mut writer: W,
     ) -> io::Result<()> {
         write!(writer, "  --> ")?;
-        write!(writer, "{}", relative_file_name.bright_cyan(),)?;
+        write!(
+            writer,
+            "{}",
+            printer.color(Color::BrightCyan, relative_file_name)
+        )?;
         write!(
             writer,
             ":{}:{}",
-            pos_span.pos.y.fg(Color::BrightMagenta),
-            pos_span.pos.x.fg(Color::BrightMagenta),
+            printer.color(Color::BrightMagenta, &pos_span.pos.y),
+            printer.color(Color::BrightMagenta, &pos_span.pos.x),
         )?;
         writeln!(writer)?;
         writeln!(writer)
