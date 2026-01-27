@@ -4,9 +4,7 @@
  */
 pub mod prelude;
 
-use std::fmt::{Display, Formatter};
-use std::io;
-use std::io::Write;
+use std::fmt::{self, Display, Formatter, Write};
 
 pub use tinter::Color;
 pub use tinter::Printer;
@@ -85,17 +83,17 @@ impl SourceFileSection {
     }
 
     /// Writes the number of specified spaces
-    fn source_code_pad<W: Write>(count: usize, mut writer: W) -> io::Result<()> {
+    fn source_code_pad<W: Write>(count: usize, mut writer: W) -> fmt::Result {
         write!(writer, "{}", " ".repeat(count))
     }
 
     /// Writes the number of specified spaces
-    fn scope_margin_pad<W: Write>(count: usize, mut writer: W) -> io::Result<()> {
+    fn scope_margin_pad<W: Write>(count: usize, mut writer: W) -> fmt::Result {
         write!(writer, "{}", " ".repeat(count))
     }
 
     /// Writes the number of specified spaces
-    fn line_number_margin_pad<W: Write>(count: usize, mut writer: W) -> io::Result<()> {
+    fn line_number_margin_pad<W: Write>(count: usize, mut writer: W) -> fmt::Result {
         write!(writer, "{}", " ".repeat(count))
     }
 
@@ -203,7 +201,7 @@ impl SourceFileSection {
         tab_width: usize,
         printer: &Printer,
         mut writer: W,
-    ) -> io::Result<()> {
+    ) -> fmt::Result {
         let expanded_line = Self::expand_tabs(source_line, tab_width);
         let chars: Vec<char> = expanded_line.chars().collect();
         let mut current_pos = 0;
@@ -281,7 +279,7 @@ impl SourceFileSection {
         max_scopes: usize,
         printer: &Printer,
         mut writer: W,
-    ) -> io::Result<()> {
+    ) -> fmt::Result {
         let mut sorted_scopes = active_scopes.to_vec();
         sorted_scopes.sort_by_key(|scope| scope.start.pos.x);
 
@@ -302,7 +300,7 @@ impl SourceFileSection {
         line_number: Option<usize>,
         printer: &Printer,
         mut writer: W,
-    ) -> io::Result<()> {
+    ) -> fmt::Result {
         let number_string =
             line_number.map_or_else(String::new, |found_number| found_number.to_string());
 
@@ -342,7 +340,7 @@ impl SourceFileSection {
     ///
     /// # Errors
     /// Returns an error if the line number is not provided in `PrefixInfo`,
-    /// or if there are I/O errors during writing.
+    /// or if there are formatting errors during writing.
     pub fn write_source_line_with_prefixes(
         prefix_info: &PrefixInfo,
         labels: &[&Label],
@@ -350,13 +348,8 @@ impl SourceFileSection {
         tab_width: usize,
         printer: &Printer,
         mut writer: impl Write,
-    ) -> io::Result<()> {
-        let current_line_number = prefix_info.line_number.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "PrefixInfo is missing line_number for source line rendering",
-            )
-        })?;
+    ) -> fmt::Result {
+        let current_line_number = prefix_info.line_number.ok_or(fmt::Error)?;
         Self::write_line_prefix(
             prefix_info.max_number_string_size,
             Some(current_line_number),
@@ -395,12 +388,12 @@ impl SourceFileSection {
     /// Writes the prefix for a line (line number and scope bars).
     ///
     /// # Errors
-    /// Returns an error if there are I/O errors during writing.
+    /// Returns an error if there are formatting errors during writing.
     pub fn write_start_of_line_prefix(
         prefix: &PrefixInfo,
         printer: &Printer,
         mut writer: impl Write,
-    ) -> io::Result<()> {
+    ) -> fmt::Result {
         Self::write_line_prefix(
             prefix.max_number_string_size,
             prefix.line_number,
@@ -419,7 +412,7 @@ impl SourceFileSection {
     /// Writes underline markers (─┬─) beneath source code to indicate label positions.
     ///
     /// # Errors
-    /// Returns an error if character_count is zero or if there are I/O errors during writing.
+    /// Returns an error if character_count is zero or if there are formatting errors during writing.
     pub fn write_underlines_for_upcoming_labels(
         prefix_info: &PrefixInfo,
         line_labels: &[&Label],
@@ -427,7 +420,7 @@ impl SourceFileSection {
         tab_width: usize,
         printer: &Printer,
         mut writer: impl Write,
-    ) -> io::Result<()> {
+    ) -> fmt::Result {
         Self::write_start_of_line_prefix(prefix_info, printer, &mut writer)?;
 
         let mut current_pos = 0;
@@ -441,10 +434,7 @@ impl SourceFileSection {
             }
 
             if label.character_count == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "character_count is too low",
-                ));
+                return Err(fmt::Error);
             }
             let middle = (label.character_count - 1) / 2;
             let underline: String = (0..label.character_count)
@@ -462,7 +452,7 @@ impl SourceFileSection {
     /// Writes label text with connectors (╰──) pointing to their positions in the source.
     ///
     /// # Errors
-    /// Returns an error if there are I/O errors during writing.
+    /// Returns an error if there are formatting errors during writing.
     pub fn write_labels(
         prefix_info: &PrefixInfo,
         line_labels: &[&Label],
@@ -470,7 +460,7 @@ impl SourceFileSection {
         tab_width: usize,
         printer: &Printer,
         mut writer: impl Write,
-    ) -> io::Result<()> {
+    ) -> fmt::Result {
         for (idx, label) in line_labels.iter().enumerate() {
             Self::write_start_of_line_prefix(prefix_info, printer, &mut writer)?;
 
@@ -512,14 +502,14 @@ impl SourceFileSection {
     /// Writes text descriptions for scopes that end on the current line.
     ///
     /// # Errors
-    /// Returns an error if there are I/O errors during writing.
+    /// Returns an error if there are formatting errors during writing.
     pub fn write_text_for_ending_scopes(
         prefix_info: &PrefixInfo,
         active_scopes: &[&Scope],
         line_number: usize, // Line number is provided, since the prefix_info line_number is `None`.
         printer: &Printer,
         mut writer: impl Write,
-    ) -> io::Result<()> {
+    ) -> fmt::Result {
         for scope in active_scopes {
             if scope.end.pos.y == line_number {
                 Self::write_start_of_line_prefix(prefix_info, printer, &mut writer)?;
@@ -555,13 +545,13 @@ impl SourceFileSection {
     ///
     /// # Errors
     /// Returns an error if a source line cannot be found for a line number,
-    /// or if there are I/O errors during writing.
+    /// or if there are formatting errors during writing.
     pub fn draw<W: Write, S: SourceLines>(
         &self,
         source: &S,
         printer: &Printer,
         mut writer: W,
-    ) -> io::Result<()> {
+    ) -> fmt::Result {
         let line_numbers_to_show = self.calculate_source_lines_that_must_be_shown();
 
         let max_overlapping_scopes_count = Self::calculate_max_overlapping_scopes(&self.scopes);
@@ -572,12 +562,7 @@ impl SourceFileSection {
             .map_or(0, |&max_line| max_line.to_string().len());
 
         for &line_number in &line_numbers_to_show {
-            let source_line = source.get_line(line_number).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Source line {line_number} not found in source map"),
-                )
-            })?;
+            let source_line = source.get_line(line_number).ok_or(fmt::Error)?;
 
             // Get active scopes for source line (includes end line)
             let active_scopes: Vec<_> = self
@@ -683,8 +668,8 @@ impl<C: Display> Header<C> {
     /// Writes the error/warning header with code and message.
     ///
     /// # Errors
-    /// Returns an error if there are I/O errors during writing.
-    pub fn write<W: Write>(&self, printer: &Printer, mut writer: W) -> io::Result<()> {
+    /// Returns an error if there are formatting errors during writing.
+    pub fn write<W: Write>(&self, printer: &Printer, mut writer: W) -> fmt::Result {
         write!(
             writer,
             "{}",
@@ -708,13 +693,13 @@ impl FileSpanMessage {
     /// Writes the file location pointer (e.g., " --> file.txt:3:10").
     ///
     /// # Errors
-    /// Returns an error if there are I/O errors during writing.
+    /// Returns an error if there are formatting errors during writing.
     pub fn write<W: Write>(
         relative_file_name: &str,
         pos_span: &PosSpan,
         printer: &Printer,
         mut writer: W,
-    ) -> io::Result<()> {
+    ) -> fmt::Result {
         write!(writer, "  --> ")?;
         write!(
             writer,
