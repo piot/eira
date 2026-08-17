@@ -631,8 +631,12 @@ impl SourceFileSection {
 #[derive(Copy, Clone, Debug)]
 pub enum Kind {
     Help, // Give extra information about an error. Maybe should be included in each warning and error?
+    Idiom, // Suggests an idiomatic style or design choice.
+    Lint, // Suggests removing redundant or unnecessary code.
+    Advisory, // Warns about a concrete cost or risk without indicating invalid code.
     Note, // Extra context. Maybe should be included in each warning and error?
     Warning,
+    Hint, // Styling, formatting, should maybe not be called hint? it is usually not reflected in AST changes, just whitespace and similar
     Error,
 }
 
@@ -640,8 +644,12 @@ impl Display for Kind {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let prefix = match self {
             Self::Help => "help",
+            Self::Idiom => "idiom",
+            Self::Lint => "lint",
+            Self::Advisory => "advisory",
             Self::Note => "note",
             Self::Warning => "warning",
+            Self::Hint => "hint",
             Self::Error => "error",
         };
         write!(f, "{prefix}")
@@ -659,7 +667,11 @@ impl<C: Display> Header<C> {
     const fn color_for_kind(kind: Kind) -> Color {
         match kind {
             Kind::Help => Color::BrightBlue,
-            Kind::Note => Color::BrightMagenta,
+            Kind::Idiom => Color::BrightCyan,
+            Kind::Lint => Color::BrightBlack,
+            Kind::Hint => Color::BrightBlack,
+            Kind::Advisory => Color::BrightGreen,
+            Kind::Note => Color::BrightBlack,
             Kind::Warning => Color::BrightYellow,
             Kind::Error => Color::BrightRed,
         }
